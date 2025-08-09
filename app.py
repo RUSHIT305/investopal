@@ -1,580 +1,439 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import plotly.express as px
+import requests
+from datetime import datetime, timedelta
 
-st.set_page_config(layout="wide", page_title="InvestoPal", page_icon="📈")
+# --- Configuration --- #
+NEWS_API_KEY = "YOUR_NEWS_API_KEY"  # Replace with your actual NewsAPI key
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        text-align: center;
-        padding: 1rem 0;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border-radius: 10px;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid #667eea;
-    }
-    .risk-badge {
-        padding: 0.25rem 0.75rem;
-        border-radius: 20px;
-        font-weight: bold;
-        color: white;
-    }
-    .conservative { background-color: #28a745; }
-    .moderate { background-color: #ffc107; color: black; }
-    .aggressive { background-color: #dc3545; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="main-header"><h1>📈 InvestoPal: Smart Investment Platform</h1><p>Your AI-powered investment companion for smarter financial decisions</p></div>', unsafe_allow_html=True)
-
-# Risk categories with enhanced data
-RISK_CATEGORIES = {
+RISK_PROFILES = {
     "Conservative": {
-        "description": "Low risk, stable returns. Perfect for beginners and risk-averse investors.",
-        "examples": ["AAPL", "MSFT", "JNJ", "PG", "KO", "WMT", "VZ"],
-        "color": "#28a745",
-        "expected_return": "6-10%",
-        "volatility": "Low (10-20%)"
+        "description": "Focus on capital preservation with lower risk and steady returns.",
+        "expected_return": 0.05,  # 5% annual return
+        "stock_type": "large-cap",
+        "example_stocks": ["MSFT", "AAPL", "GOOGL", "AMZN", "JPM"],
     },
-    "Moderate": {
-        "description": "Balanced risk-reward. Mix of growth and stability for experienced investors.",
-        "examples": ["GOOGL", "AMZN", "NVDA", "V", "MA", "NFLX", "CRM"],
-        "color": "#ffc107",
-        "expected_return": "10-15%",
-        "volatility": "Medium (20-40%)"
+    "Balanced": {
+        "description": "A mix of growth and stability, aiming for moderate returns.",
+        "expected_return": 0.08,  # 8% annual return
+        "stock_type": "large & mid-cap",
+        "example_stocks": ["MSFT", "GOOGL", "ADBE", "PYPL", "INTC"],
     },
     "Aggressive": {
-        "description": "High risk, high potential returns. For experienced investors with high risk tolerance.",
-        "examples": ["TSLA", "GME", "AMC", "PLTR", "COIN", "ARKK", "SPCE"],
-        "color": "#dc3545",
-        "expected_return": "15%+",
-        "volatility": "High (40%+)"
-    }
+        "description": "Higher risk for potentially higher returns, focusing on growth stocks.",
+        "expected_return": 0.12,  # 12% annual return
+        "stock_type": "small-cap & high-growth",
+        "example_stocks": ["TSLA", "NVDA", "AMD", "SQ", "CRWD"],
+    },
 }
 
-def get_stock_data(ticker, start_date, end_date):
-    """Fetches historical stock data for a given ticker."""
+# --- Helper Functions --- #
+def calculate_projected_value(principal, annual_return, years):
+    return principal * (1 + annual_return)**years
+
+@st.cache_data
+def get_stock_data(ticker):
     try:
-        data = yf.download(ticker, start=start_date, end=end_date)
-        if data.empty:
-            st.warning(f"No data found for {ticker} between {start_date} and {end_date}.")
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1y")
+        if not hist.empty:
+            current_price = hist["Close"].iloc[-1]
+            previous_close = hist["Close"].iloc[-2]
+            daily_change_abs = current_price - previous_close
+            daily_change_pct = (daily_change_abs / previous_close) * 100
+
+            one_year_ago_price = hist["Close"].iloc[0]
+            one_year_return_pct = ((current_price - one_year_ago_price) / one_year_ago_price) * 100
+
+            return {
+                "current_price": current_price,
+                "daily_change_abs": daily_change_abs,
+                "daily_change_pct": daily_change_pct,
+                "one_year_return_pct": one_year_return_pct,
+                "history": hist
+            }
+        else:
             return None
-        return data
     except Exception as e:
         st.error(f"Error fetching data for {ticker}: {e}")
         return None
 
-def calculate_risk_metrics(data):
-    """Calculate comprehensive risk metrics for the stock."""
-    if data is None or data.empty:
-        return None
+@st.cache_data
+def get_financial_news(query, api_key, num_articles=5):
+    if api_key == "YOUR_NEWS_API_KEY":
+        st.warning("Please replace 'YOUR_NEWS_API_KEY' with your actual NewsAPI key to fetch live news.")
+        return []
     
-    # Handle both single-level and multi-level column indexes
-    if isinstance(data.columns, pd.MultiIndex):
-        # For multi-level columns, get the first ticker's data
-        adj_close = data[('Adj Close', data.columns.get_level_values(1)[0])]
-    else:
-        adj_close = data['Adj Close']
-    
-    returns = adj_close.pct_change().dropna()
-    
-    # Calculate rolling metrics
-    rolling_volatility = returns.rolling(window=30).std() * np.sqrt(252)
-    
-    metrics = {
-        "volatility": returns.std() * np.sqrt(252),
-        "avg_return": returns.mean() * 252,
-        "max_drawdown": ((adj_close / adj_close.cummax()) - 1).min(),
-        "sharpe_ratio": (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else 0,
-        "var_95": np.percentile(returns, 5),  # Value at Risk
-        "cvar_95": returns[returns <= np.percentile(returns, 5)].mean(),  # Conditional VaR
-        "rolling_volatility": rolling_volatility,
-        "total_return": (adj_close.iloc[-1] / adj_close.iloc[0] - 1) * 100
-    }
-    
-    return metrics
+    url = f"https://newsapi.org/v2/everything?q={query}&sortBy=relevancy&apiKey={api_key}&pageSize={num_articles}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        if data["status"] == "ok":
+            return data["articles"]
+        else:
+            st.error(f"Error fetching news: {data.get('message', 'Unknown error')}")
+            return []
+    except Exception as e:
+        st.error(f"Error fetching news: {e}")
+        return []
 
-def categorize_risk(volatility):
-    """Categorize stock based on volatility."""
-    if volatility < 0.2:
-        return "Conservative"
-    elif volatility < 0.4:
-        return "Moderate"
-    else:
-        return "Aggressive"
+# --- Streamlit App --- #
+st.set_page_config(layout="wide", page_title="InvestoPal")
 
-def simulate_investment(initial_amount, annual_return, years, monthly_contribution=0):
-    """Simulate investment growth with compound interest."""
-    months = years * 12
-    monthly_return = annual_return / 12
-    
-    values = [initial_amount]
-    current_value = initial_amount
-    
-    for month in range(1, months + 1):
-        current_value = current_value * (1 + monthly_return) + monthly_contribution
-        values.append(current_value)
-    
-    return values
+st.title("📈 InvestoPal – Smart Investment Guide")
 
-def create_advanced_chart(stock_data, metrics, ticker):
-    """Create advanced multi-panel chart with price, volume, and volatility."""
-    fig = make_subplots(
-        rows=3, cols=1,
-        subplot_titles=(f'{ticker} Price Movement', 'Volume', 'Rolling Volatility'),
-        vertical_spacing=0.08,
-        row_heights=[0.6, 0.2, 0.2]
-    )
-    
-    # Handle both single-level and multi-level column indexes
-    if isinstance(stock_data.columns, pd.MultiIndex):
-        adj_close = stock_data[('Adj Close', stock_data.columns.get_level_values(1)[0])]
-        volume = stock_data[('Volume', stock_data.columns.get_level_values(1)[0])]
-    else:
-        adj_close = stock_data['Adj Close']
-        volume = stock_data['Volume']
-    
-    # Price chart with moving averages
-    fig.add_trace(
-        go.Scatter(x=stock_data.index, y=adj_close,
-                  name='Price', line=dict(color='#1f77b4', width=2)),
-        row=1, col=1
-    )
-    
-    # Add moving averages
-    ma_20 = adj_close.rolling(window=20).mean()
-    ma_50 = adj_close.rolling(window=50).mean()
-    
-    fig.add_trace(
-        go.Scatter(x=stock_data.index, y=ma_20,
-                  name='MA 20', line=dict(color='orange', width=1, dash='dash')),
-        row=1, col=1
-    )
-    
-    fig.add_trace(
-        go.Scatter(x=stock_data.index, y=ma_50,
-                  name='MA 50', line=dict(color='red', width=1, dash='dot')),
-        row=1, col=1
-    )
-    
-    # Volume chart
-    fig.add_trace(
-        go.Bar(x=stock_data.index, y=volume,
-               name='Volume', marker_color='lightblue'),
-        row=2, col=1
-    )
-    
-    # Rolling volatility
-    fig.add_trace(
-        go.Scatter(x=stock_data.index, y=metrics['rolling_volatility'],
-                  name='30-Day Volatility', line=dict(color='purple', width=2)),
-        row=3, col=1
-    )
-    
-    fig.update_layout(
-        height=800,
-        title_text=f"Comprehensive Analysis - {ticker}",
-        showlegend=True,
-        template='plotly_white'
-    )
-    
-    return fig
+# Sidebar
+st.sidebar.header("Your Investment Profile")
 
-def create_investment_chart(values, years, initial_amount, ticker):
-    """Create an enhanced investment growth chart."""
-    months = list(range(len(values)))
-    years_labels = [m/12 for m in months]
-    
-    fig = go.Figure()
-    
-    # Investment growth line
-    fig.add_trace(go.Scatter(
-        x=years_labels,
-        y=values,
-        mode='lines',
-        name=f'{ticker} Investment Growth',
-        line=dict(color='#1f77b4', width=3),
-        fill='tonexty',
-        hovertemplate='<b>Year %{x:.1f}</b><br>Portfolio Value: ₹%{y:,.0f}<extra></extra>'
-    ))
-    
-    # Add initial investment line
-    fig.add_hline(y=initial_amount, line_dash="dash", 
-                  annotation_text=f"Initial: ₹{initial_amount:,.0f}",
-                  line_color="red")
-    
-    # Add final value annotation
-    fig.add_annotation(
-        x=years_labels[-1],
-        y=values[-1],
-        text=f"Final: ₹{values[-1]:,.0f}",
-        showarrow=True,
-        arrowhead=2,
-        bgcolor="lightgreen",
-        bordercolor="green"
-    )
-    
-    fig.update_layout(
-        title=f"Investment Growth Simulation - {ticker}",
-        xaxis_title="Years",
-        yaxis_title="Portfolio Value (₹)",
-        hovermode='x unified',
-        template='plotly_white',
-        height=500
-    )
-    
-    return fig
-
-def generate_ai_advice(ticker, risk_category, metrics, selected_risk):
-    """Generate AI-powered investment advice."""
-    advice = []
-    
-    # Risk assessment advice
-    if risk_category != selected_risk:
-        if risk_category == "Aggressive" and selected_risk in ["Conservative", "Moderate"]:
-            advice.append(f"⚠️ **Risk Mismatch**: {ticker} is more volatile than your preference. Consider reducing position size or diversifying.")
-        elif risk_category == "Conservative" and selected_risk == "Aggressive":
-            advice.append(f"ℹ️ **Lower Risk**: {ticker} is less risky than you prefer. You might want to explore growth stocks for higher returns.")
-    
-    # Performance advice
-    if metrics["sharpe_ratio"] > 1.5:
-        advice.append(f"✅ **Strong Performance**: {ticker} has excellent risk-adjusted returns (Sharpe: {metrics['sharpe_ratio']:.2f})")
-    elif metrics["sharpe_ratio"] < 0.5:
-        advice.append(f"⚠️ **Poor Risk-Adjusted Returns**: Consider if the risk is worth the potential reward.")
-    
-    # Volatility advice
-    if metrics["volatility"] > 0.5:
-        advice.append(f"🎢 **High Volatility**: Expect significant price swings. Only invest what you can afford to lose.")
-    elif metrics["volatility"] < 0.15:
-        advice.append(f"📈 **Stable Investment**: Low volatility makes this suitable for conservative portfolios.")
-    
-    # Drawdown advice
-    if abs(metrics["max_drawdown"]) > 0.3:
-        advice.append(f"📉 **High Drawdown Risk**: This stock has experienced drops of {abs(metrics['max_drawdown']):.1%}. Be prepared for potential losses.")
-    
-    return advice
-
-# Sidebar configuration
-st.sidebar.header("🎯 Investment Profile")
-selected_risk = st.sidebar.selectbox(
-    "Choose your risk level:",
-    list(RISK_CATEGORIES.keys()),
-    help="Select based on your investment experience and risk tolerance"
+risk_tolerance = st.sidebar.radio(
+    "Select your Risk Tolerance:",
+    list(RISK_PROFILES.keys())
 )
 
-# Enhanced risk info display
-risk_info = RISK_CATEGORIES[selected_risk]
-st.sidebar.markdown(f"""
-**{selected_risk} Investor Profile**
-- **Description**: {risk_info['description']}
-- **Expected Returns**: {risk_info['expected_return']}
-- **Volatility**: {risk_info['volatility']}
-- **Examples**: {', '.join(risk_info['examples'][:3])}
-""")
-
-# Investment simulator sidebar
-st.sidebar.header("💰 Investment Calculator")
 investment_amount = st.sidebar.number_input(
-    "Initial Investment (₹):",
-    min_value=1000,
-    max_value=10000000,
-    value=50000,
-    step=5000
+    "Investment Amount (₹)",
+    min_value=1000, value=100000, step=1000
 )
 
-monthly_sip = st.sidebar.number_input(
-    "Monthly SIP (₹):",
-    min_value=0,
-    max_value=100000,
-    value=10000,
-    step=1000,
-    help="Systematic Investment Plan - monthly contribution"
+investment_horizon = st.sidebar.selectbox(
+    "Investment Horizon (years)",
+    (1, 3, 5, 10, 15, 20)
 )
 
-investment_years = st.sidebar.slider(
-    "Investment Period (Years):",
-    min_value=1,
-    max_value=30,
-    value=15
-)
+selected_profile = RISK_PROFILES[risk_tolerance]
 
-# Portfolio comparison
-st.sidebar.header("📊 Portfolio Comparison")
-compare_tickers = st.sidebar.text_input(
-    "Compare with (comma-separated):",
-    placeholder="AAPL,GOOGL,TSLA",
-    help="Enter multiple tickers to compare"
-)
+st.sidebar.subheader("Risk Profile Details:")
+st.sidebar.write(f"**Type:** {risk_tolerance}")
+st.sidebar.write(f"**Description:** {selected_profile['description']}")
+st.sidebar.write(f"**Expected Annual Return:** {selected_profile['expected_return']:.2%}")
 
-# Main interface
-col1, col2 = st.columns([3, 1])
+# Main Content Area
+st.header("Investment Analysis")
+
+col1, col2 = st.columns(2)
 
 with col1:
-    ticker = st.text_input(
-        "🔍 Enter Stock Ticker:",
-        value=risk_info['examples'][0],
-        help="Try stocks from your selected risk category"
-    ).upper()
-
-with col2:
-    analysis_type = st.selectbox(
-        "Analysis Type:",
-        ["Detailed", "Quick", "Comparison"],
-        help="Choose analysis depth"
+    st.subheader("Stock Recommendations & Analysis")
+    st.write(f"Based on your **{risk_tolerance}** risk tolerance, we recommend looking into **{selected_profile['stock_type']}** stocks.")
+    
+    selected_stock = st.selectbox(
+        "Select a stock for detailed analysis:",
+        selected_profile['example_stocks']
     )
 
-# Date selection with presets
-date_col1, date_col2, date_col3 = st.columns([1, 1, 1])
-with date_col1:
-    date_preset = st.selectbox("Quick Select:", ["Custom", "1 Year", "3 Years", "5 Years", "10 Years"])
+    if selected_stock:
+        stock_data = get_stock_data(selected_stock)
+        if stock_data:
+            st.write(f"### {selected_stock}")
+            st.write(f"**Current Price:** ₹{stock_data['current_price']:.2f}")
+            color = "green" if stock_data['daily_change_abs'] >= 0 else "red"
+            st.markdown(f"**Daily Change:** <span style='color:{color}'>₹{stock_data['daily_change_abs']:.2f} ({stock_data['daily_change_pct']:.2f}%)</span>", unsafe_allow_html=True)
+            st.write(f"**1-Year Return:** {stock_data['one_year_return_pct']:.2f}%")
 
-if date_preset != "Custom":
-    years_back = {"1 Year": 1, "3 Years": 3, "5 Years": 5, "10 Years": 10}[date_preset]
-    end_date = pd.to_datetime("today")
-    start_date = end_date - pd.DateOffset(years=years_back)
-else:
-    with date_col2:
-        start_date = st.date_input("Start Date:", pd.to_datetime("2020-01-01"))
-    with date_col3:
-        end_date = st.date_input("End Date:", pd.to_datetime("2024-01-01"))
-
-# Main analysis button
-if st.button("🚀 Run Complete Analysis", type="primary", use_container_width=True):
-    if ticker and start_date and end_date:
-        with st.spinner(f"Running comprehensive analysis for {ticker}..."):
-            stock_data = get_stock_data(ticker, start_date, end_date)
-            
-        if stock_data is not None:
-            # Calculate metrics
-            metrics = calculate_risk_metrics(stock_data)
-            risk_category = categorize_risk(metrics["volatility"])
-            
-            # Success message
-            st.success(f"✅ Analysis complete for {ticker} | Period: {start_date} to {end_date}")
-            
-            # Key metrics dashboard
-            st.subheader("📊 Key Performance Metrics")
-            metric_cols = st.columns(5)
-            
-            with metric_cols[0]:
-                st.metric("Risk Level", risk_category, 
-                         delta=f"vs {selected_risk}" if risk_category != selected_risk else None)
-            with metric_cols[1]:
-                st.metric("Total Return", f"{metrics['total_return']:.1f}%")
-            with metric_cols[2]:
-                st.metric("Volatility", f"{metrics['volatility']:.1%}")
-            with metric_cols[3]:
-                st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-            with metric_cols[4]:
-                st.metric("Max Drawdown", f"{metrics['max_drawdown']:.1%}")
-            
-            # AI-powered advice
-            st.subheader("🤖 AI Investment Advice")
-            advice_list = generate_ai_advice(ticker, risk_category, metrics, selected_risk)
-            for advice in advice_list:
-                st.markdown(f"- {advice}")
-            
-            # Advanced charts
-            if analysis_type == "Detailed":
-                st.subheader("📈 Advanced Technical Analysis")
-                advanced_chart = create_advanced_chart(stock_data, metrics, ticker)
-                st.plotly_chart(advanced_chart, use_container_width=True)
-            
-            # Investment Simulation
-            st.markdown("---")
-            st.subheader("💰 Investment Simulation Results")
-            
-            # Run simulation
-            projected_values = simulate_investment(
-                investment_amount, 
-                metrics["avg_return"], 
-                investment_years, 
-                monthly_sip
+            # Plotting chart with enhanced styling
+            fig = px.line(
+                stock_data['history'], 
+                y="Close", 
+                title=f"{selected_stock} Closing Price (1 Year)",
+                color_discrete_sequence=['#007bff']
             )
-            
-            final_value = projected_values[-1]
-            total_invested = investment_amount + (monthly_sip * investment_years * 12)
-            total_returns = final_value - total_invested
-            return_percentage = (total_returns / total_invested) * 100 if total_invested > 0 else 0
-            
-            # Simulation results
-            sim_cols = st.columns(4)
-            with sim_cols[0]:
-                st.metric("💵 Total Invested", f"₹{total_invested:,.0f}")
-            with sim_cols[1]:
-                st.metric("💎 Final Value", f"₹{final_value:,.0f}")
-            with sim_cols[2]:
-                st.metric("📈 Total Returns", f"₹{total_returns:,.0f}")
-            with sim_cols[3]:
-                st.metric("📊 Return %", f"{return_percentage:.1f}%")
-            
-            # Investment growth chart
-            investment_chart = create_investment_chart(
-                projected_values, investment_years, investment_amount, ticker
+            fig.update_layout(
+                title_font_size=16,
+                title_font_color='#2c3e50',
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                xaxis=dict(gridcolor='#e1e5e9'),
+                yaxis=dict(gridcolor='#e1e5e9')
             )
-            st.plotly_chart(investment_chart, use_container_width=True)
-            
-            # Portfolio comparison
-            if compare_tickers and analysis_type == "Comparison":
-                st.subheader("⚖️ Portfolio Comparison")
-                comparison_tickers = [t.strip().upper() for t in compare_tickers.split(",")]
-                
-                comparison_data = {}
-                for comp_ticker in comparison_tickers[:3]:  # Limit to 3 for performance
-                    comp_data = get_stock_data(comp_ticker, start_date, end_date)
-                    if comp_data is not None:
-                        comp_metrics = calculate_risk_metrics(comp_data)
-                        comparison_data[comp_ticker] = comp_metrics
-                
-                if comparison_data:
-                    # Create comparison chart
-                    comparison_df = pd.DataFrame({
-                        'Ticker': [ticker] + list(comparison_data.keys()),
-                        'Return': [metrics['avg_return']] + [m['avg_return'] for m in comparison_data.values()],
-                        'Volatility': [metrics['volatility']] + [m['volatility'] for m in comparison_data.values()],
-                        'Sharpe': [metrics['sharpe_ratio']] + [m['sharpe_ratio'] for m in comparison_data.values()]
-                    })
-                    
-                    fig = px.scatter(comparison_df, x='Volatility', y='Return', 
-                                   size='Sharpe', hover_name='Ticker',
-                                   title='Risk vs Return Comparison',
-                                   labels={'Volatility': 'Risk (Volatility)', 'Return': 'Expected Return'})
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            # Detailed breakdown
-            with st.expander("📋 Detailed Investment Analysis"):
-                col_a, col_b = st.columns(2)
-                
-                with col_a:
-                    st.markdown("**Investment Parameters:**")
-                    st.write(f"• Initial Investment: ₹{investment_amount:,}")
-                    st.write(f"• Monthly SIP: ₹{monthly_sip:,}")
-                    st.write(f"• Investment Period: {investment_years} years")
-                    st.write(f"• Expected Annual Return: {metrics['avg_return']:.1%}")
-                
-                with col_b:
-                    st.markdown("**Risk Metrics:**")
-                    st.write(f"• Value at Risk (95%): {metrics['var_95']:.2%}")
-                    st.write(f"• Conditional VaR: {metrics['cvar_95']:.2%}")
-                    st.write(f"• Maximum Drawdown: {metrics['max_drawdown']:.1%}")
-                    st.write(f"• Risk Category: {risk_category}")
-                
-                if return_percentage > 0:
-                    st.success(f"🎉 Projected Growth: **₹{total_returns:,.0f}** ({return_percentage:.1f}%)")
-                else:
-                    st.warning("⚠️ Based on historical data, this investment might result in losses.")
-            
-            # Export functionality
-            if st.button("📄 Generate Investment Report"):
-                report_data = {
-                    "Ticker": ticker,
-                    "Analysis Date": pd.to_datetime("today").strftime("%Y-%m-%d"),
-                    "Period": f"{start_date} to {end_date}",
-                    "Risk Category": risk_category,
-                    "Total Return": f"{metrics['total_return']:.1f}%",
-                    "Volatility": f"{metrics['volatility']:.1%}",
-                    "Sharpe Ratio": f"{metrics['sharpe_ratio']:.2f}",
-                    "Investment Amount": f"₹{investment_amount:,}",
-                    "Monthly SIP": f"₹{monthly_sip:,}",
-                    "Projected Final Value": f"₹{final_value:,.0f}",
-                    "Projected Returns": f"₹{total_returns:,.0f}"
-                }
-                
-                report_df = pd.DataFrame([report_data])
-                csv = report_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Report (CSV)",
-                    data=csv,
-                    file_name=f"InvestoPal_Report_{ticker}_{pd.to_datetime('today').strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-    else:
-        st.warning("Please enter a stock ticker and select dates.")
+            st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+            st.plotly_chart(fig, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-# Educational section with enhanced content
-st.markdown("---")
-st.subheader("🎓 Investment Education Center")
+            # News Integration
+            st.subheader(f"Latest News for {selected_stock}")
+            news_articles = get_financial_news(selected_stock, NEWS_API_KEY)
+            if news_articles:
+                for article in news_articles:
+                    st.markdown(f"- [{article['title']}]({article['url']})")
+            else:
+                st.info("No news found or API key is missing/invalid.")
 
-edu_tabs = st.tabs(["Risk Levels", "Key Metrics", "Investment Strategies", "Beginner Guide"])
-
-with edu_tabs[0]:
-    risk_cols = st.columns(3)
-    for i, (risk_level, info) in enumerate(RISK_CATEGORIES.items()):
-        with risk_cols[i]:
-            st.markdown(f"### {risk_level}")
-            st.markdown(f"**Expected Returns**: {info['expected_return']}")
-            st.markdown(f"**Volatility**: {info['volatility']}")
-            st.markdown(f"**Description**: {info['description']}")
-            st.markdown(f"**Examples**: {', '.join(info['examples'][:3])}")
-
-with edu_tabs[1]:
-    st.markdown("""
-    **📊 Key Financial Metrics Explained:**
+with col2:
+    st.subheader("Investment Insights & Projections")
     
-    - **Volatility**: Measures price fluctuation. Higher = more risky
-    - **Sharpe Ratio**: Risk-adjusted returns. Higher = better performance per unit risk
-    - **Max Drawdown**: Largest peak-to-trough decline. Shows worst-case scenario
-    - **Value at Risk (VaR)**: Potential loss in worst 5% of cases
-    - **Total Return**: Overall percentage gain/loss over the period
-    """)
+    # Create projection visualization
+    years = list(range(1, investment_horizon + 1))
+    projected_values = [calculate_projected_value(investment_amount, selected_profile['expected_return'], year) for year in years]
+    
+    projection_df = pd.DataFrame({
+        'Year': years,
+        'Projected Value (₹)': projected_values
+    })
+    
+    # Create projection chart
+    fig_projection = px.bar(
+        projection_df, 
+        x='Year', 
+        y='Projected Value (₹)',
+        title=f"Investment Growth Projection ({risk_tolerance} Profile)",
+        color='Projected Value (₹)',
+        color_continuous_scale='Blues'
+    )
+    fig_projection.update_layout(
+        title_font_size=16,
+        title_font_color='#2c3e50',
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(gridcolor='#e1e5e9'),
+        yaxis=dict(gridcolor='#e1e5e9')
+    )
+    
+    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+    st.plotly_chart(fig_projection, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Summary metrics
+    final_projected_value = calculate_projected_value(
+        investment_amount,
+        selected_profile['expected_return'],
+        investment_horizon
+    )
+    total_gain = final_projected_value - investment_amount
+    
+    col2_1, col2_2 = st.columns(2)
+    with col2_1:
+        st.metric(
+            label="Initial Investment",
+            value=f"₹{investment_amount:,.0f}"
+        )
+    with col2_2:
+        st.metric(
+            label="Projected Value",
+            value=f"₹{final_projected_value:,.0f}",
+            delta=f"₹{total_gain:,.0f}"
+        )
+    
+    st.write(f"With an initial investment of ₹{investment_amount:,.2f} and an expected annual return of {selected_profile['expected_return']:.2%},")
+    st.write(f"your projected value in {investment_horizon} years could be **₹{final_projected_value:,.2f}**.")
 
-with edu_tabs[2]:
-    strategy_cols = st.columns(2)
-    with strategy_cols[0]:
+    st.subheader("Learn More")
+    with st.expander("Understanding Risk Levels & Investing Tips"):
         st.markdown("""
-        **🎯 Conservative Strategies:**
-        - Dollar-cost averaging (SIP)
-        - Blue-chip dividend stocks
-        - Index fund investing
-        - Long-term buy and hold
+        ### Risk Levels Explained
+        
+        **🟢 Conservative (Low Risk)**
+        - Focus on stable, well-established companies with a history of consistent dividends
+        - Examples: Blue-chip stocks, government bonds, dividend-paying stocks
+        - Expected return: 3-7% annually
+        - Best for: Risk-averse investors, those nearing retirement
+        
+        **🟡 Balanced (Moderate Risk)**
+        - A diversified portfolio with a mix of growth and value stocks
+        - Examples: Mix of large-cap and mid-cap stocks, balanced mutual funds
+        - Expected return: 6-10% annually
+        - Best for: Investors with moderate risk tolerance, long-term goals
+        
+        **🔴 Aggressive (High Risk)**
+        - Higher allocation to growth stocks, emerging markets, and potentially volatile assets
+        - Examples: Small-cap stocks, growth stocks, emerging market funds
+        - Expected return: 8-15% annually (with higher volatility)
+        - Best for: Young investors, those with high risk tolerance
+        
+        ### 💡 Essential Investing Tips
+        
+        **1. Start Early & Invest Regularly**
+        - Time is your greatest asset in investing
+        - Consider systematic investment plans (SIPs)
+        - Even small amounts can grow significantly over time
+        
+        **2. Diversify Your Portfolio**
+        - Don't put all eggs in one basket
+        - Spread investments across different sectors and asset classes
+        - Consider international diversification
+        
+        **3. Understand What You're Investing In**
+        - Research companies before investing
+        - Read annual reports and financial statements
+        - Understand the business model and competitive advantages
+        
+        **4. Stay Informed but Avoid Emotional Decisions**
+        - Keep up with market news and trends
+        - Don't panic during market downturns
+        - Stick to your long-term investment strategy
+        
+        **5. Rebalance Your Portfolio Periodically**
+        - Review your portfolio quarterly or semi-annually
+        - Adjust allocations based on your goals and market conditions
+        - Take profits from overperforming assets and reinvest
+        
+        ### 📚 Additional Resources
+        - **Books**: "The Intelligent Investor" by Benjamin Graham
+        - **Websites**: SEC.gov investor education, Morningstar.com
+        - **Podcasts**: "The Investors Podcast", "Chat with Traders"
         """)
     
-    with strategy_cols[1]:
-        st.markdown("""
-        **🚀 Growth Strategies:**
-        - Growth stock investing
-        - Sector rotation
-        - Momentum investing
-        - Technology focus
-        """)
-
-with edu_tabs[3]:
-    st.markdown("""
-    **🌟 Beginner's Investment Guide:**
+    # Risk comparison chart
+    st.subheader("Risk vs Return Comparison")
+    risk_comparison_data = pd.DataFrame({
+        'Risk Level': ['Conservative', 'Balanced', 'Aggressive'],
+        'Expected Return (%)': [5, 8, 12],
+        'Risk Score': [2, 5, 8]
+    })
     
-    1. **Start with Emergency Fund**: Save 6 months of expenses first
-    2. **Understand Your Risk Tolerance**: Use our risk assessment tool
-    3. **Start Small**: Begin with amounts you can afford to lose
-    4. **Diversify**: Don't put all eggs in one basket
-    5. **Think Long-term**: Markets fluctuate, but tend to grow over time
-    6. **Keep Learning**: Stay informed about your investments
-    7. **Regular Reviews**: Monitor and rebalance your portfolio
+    fig_risk = px.scatter(
+        risk_comparison_data,
+        x='Risk Score',
+        y='Expected Return (%)',
+        size='Expected Return (%)',
+        color='Risk Level',
+        title="Risk vs Expected Return Profile",
+        color_discrete_map={
+            'Conservative': '#28a745',
+            'Balanced': '#ffc107', 
+            'Aggressive': '#dc3545'
+        }
+    )
+    fig_risk.update_layout(
+        title_font_size=16,
+        title_font_color='#2c3e50',
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(gridcolor='#e1e5e9', title='Risk Level (1-10)'),
+        yaxis=dict(gridcolor='#e1e5e9', title='Expected Annual Return (%)')
+    )
     
-    **💡 Pro Tips:**
-    - Use SIP for regular investing
-    - Reinvest dividends for compound growth
-    - Don't panic during market downturns
-    - Consider tax implications
-    """)
+    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+    st.plotly_chart(fig_risk, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# Footer
-st.markdown("---")
+    # Export simulation results as CSV
+    df_projection = pd.DataFrame({
+        'Investment Amount': [investment_amount],
+        'Expected Annual Return': [selected_profile['expected_return']],
+        'Investment Horizon (Years)': [investment_horizon],
+        'Projected Value': [final_projected_value]
+    })
+    csv = df_projection.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Export Simulation Results as CSV",
+        data=csv,
+        file_name='investopal_simulation_results.csv',
+        mime='text/csv',
+    )
+
+# Custom CSS for professional styling
 st.markdown("""
-<div style='text-align: center; color: #666; padding: 2rem;'>
-    <p><strong>InvestoPal</strong> - Your Smart Investment Companion</p>
-    <p>⚠️ <em>Disclaimer: This tool provides educational information only. Past performance doesn't guarantee future results. Always consult with financial advisors before making investment decisions.</em></p>
-</div>
+<style>
+/* Main app styling */
+.main {
+    padding-top: 2rem;
+}
+
+/* Risk profile cards */
+.risk-card {
+    border: 2px solid #e1e5e9;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 15px;
+    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+}
+
+.risk-card:hover {
+    border-color: #007bff;
+    box-shadow: 0 8px 15px rgba(0, 123, 255, 0.2);
+    transform: translateY(-2px);
+}
+
+/* Conservative risk styling */
+.conservative-card {
+    border-color: #28a745;
+    background: linear-gradient(135deg, #d4edda 0%, #ffffff 100%);
+}
+
+/* Balanced risk styling */
+.balanced-card {
+    border-color: #ffc107;
+    background: linear-gradient(135deg, #fff3cd 0%, #ffffff 100%);
+}
+
+/* Aggressive risk styling */
+.aggressive-card {
+    border-color: #dc3545;
+    background: linear-gradient(135deg, #f8d7da 0%, #ffffff 100%);
+}
+
+/* Stock analysis cards */
+.stock-card {
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 20px;
+    margin: 10px 0;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    border-left: 4px solid #007bff;
+}
+
+/* Metrics styling */
+.metric-positive {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.metric-negative {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+/* Header styling */
+.main-header {
+    text-align: center;
+    color: #2c3e50;
+    margin-bottom: 2rem;
+    font-size: 2.5rem;
+    font-weight: 700;
+}
+
+/* Sidebar styling */
+.sidebar .sidebar-content {
+    background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+/* Button styling */
+.stDownloadButton > button {
+    background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.stDownloadButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+/* Expander styling */
+.streamlit-expanderHeader {
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 1px solid #dee2e6;
+}
+
+/* Chart container */
+.chart-container {
+    background: white;
+    border-radius: 10px;
+    padding: 15px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin: 15px 0;
+}
+</style>
 """, unsafe_allow_html=True)
+
 
